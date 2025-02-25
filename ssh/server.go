@@ -237,6 +237,24 @@ type ServerConn struct {
 // The returned error may be of type *ServerAuthError for
 // authentication errors.
 func NewServerConn(c net.Conn, config *ServerConfig) (*ServerConn, <-chan NewChannel, <-chan *Request, error) {
+	fullConf, err := serverFullConfig(config)
+	if err != nil {
+		c.Close()
+		return nil, nil, nil, err
+	}
+
+	s := &connection{
+		sshConn: sshConn{conn: c},
+	}
+	perms, err := s.serverHandshake(fullConf)
+	if err != nil {
+		c.Close()
+		return nil, nil, nil, err
+	}
+	return &ServerConn{s, perms}, s.mux.incomingChannels, s.mux.incomingRequests, nil
+}
+
+func serverFullConfig(config *ServerConfig) (*ServerConfig, error) {
 	fullConf := *config
 	fullConf.SetDefaults()
 	if fullConf.MaxAuthTries == 0 {
@@ -247,28 +265,18 @@ func NewServerConn(c net.Conn, config *ServerConfig) (*ServerConn, <-chan NewCha
 	} else {
 		for _, algo := range fullConf.PublicKeyAuthAlgorithms {
 			if !contains(supportedPubKeyAuthAlgos, algo) {
-				c.Close()
-				return nil, nil, nil, fmt.Errorf("ssh: unsupported public key authentication algorithm %s", algo)
+				return nil, fmt.Errorf("ssh: unsupported public key authentication algorithm %s", algo)
 			}
 		}
 	}
 	// Check if the config contains any unsupported key exchanges
 	for _, kex := range fullConf.KeyExchanges {
 		if _, ok := serverForbiddenKexAlgos[kex]; ok {
-			c.Close()
-			return nil, nil, nil, fmt.Errorf("ssh: unsupported key exchange %s for server", kex)
+			return nil, fmt.Errorf("ssh: unsupported key exchange %s for server", kex)
 		}
 	}
 
-	s := &connection{
-		sshConn: sshConn{conn: c},
-	}
-	perms, err := s.serverHandshake(&fullConf)
-	if err != nil {
-		c.Close()
-		return nil, nil, nil, err
-	}
-	return &ServerConn{s, perms}, s.mux.incomingChannels, s.mux.incomingRequests, nil
+	return &fullConf, nil
 }
 
 // signAndMarshal signs the data with the appropriate algorithm,
@@ -285,6 +293,16 @@ func signAndMarshal(k AlgorithmSigner, rand io.Reader, data []byte, algo string)
 
 // handshake performs key exchange and user authentication.
 func (s *connection) serverHandshake(config *ServerConfig) (*Permissions, error) {
+	perms, err := s.serverHandshakeNoMux(config)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mux = newMux(s.transport)
+	return perms, nil
+}
+
+func (s *connection) serverHandshakeNoMux(config *ServerConfig) (*Permissions, error) {
 	if len(config.hostKeys) == 0 {
 		return nil, errors.New("ssh: server has no host keys")
 	}
@@ -339,7 +357,7 @@ func (s *connection) serverHandshake(config *ServerConfig) (*Permissions, error)
 	if err != nil {
 		return nil, err
 	}
-	s.mux = newMux(s.transport)
+
 	return perms, err
 }
 

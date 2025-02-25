@@ -69,23 +69,32 @@ func NewClient(c Conn, chans <-chan NewChannel, reqs <-chan *Request) *Client {
 // as the underlying transport.  The Request and NewChannel channels
 // must be serviced or the connection will hang.
 func NewClientConn(c net.Conn, addr string, config *ClientConfig) (Conn, <-chan NewChannel, <-chan *Request, error) {
-	fullConf := *config
-	fullConf.SetDefaults()
-	if fullConf.HostKeyCallback == nil {
+	fullConf, err := clientFullConfig(config)
+	if err != nil {
 		c.Close()
-		return nil, nil, nil, errors.New("ssh: must specify HostKeyCallback")
+		return nil, nil, nil, err
 	}
 
 	conn := &connection{
 		sshConn: sshConn{conn: c, user: fullConf.User},
 	}
 
-	if err := conn.clientHandshake(addr, &fullConf); err != nil {
+	if err := conn.clientHandshake(addr, fullConf); err != nil {
 		c.Close()
 		return nil, nil, nil, fmt.Errorf("ssh: handshake failed: %w", err)
 	}
 	conn.mux = newMux(conn.transport)
 	return conn, conn.mux.incomingChannels, conn.mux.incomingRequests, nil
+}
+
+func clientFullConfig(config *ClientConfig) (*ClientConfig, error) {
+	fullConf := *config
+	fullConf.SetDefaults()
+	if fullConf.HostKeyCallback == nil {
+		return nil, errors.New("ssh: must specify HostKeyCallback")
+	}
+
+	return &fullConf, nil
 }
 
 // clientHandshake performs the client side key exchange. See RFC 4253 Section
